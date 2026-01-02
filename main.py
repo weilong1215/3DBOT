@@ -17,7 +17,7 @@ def send_telegram_msg(message):
         pass
 
 def check_bitget_signals():
-    send_telegram_msg("🔍 *Bitget 3D 自定義掃描 (1/1 重啟邏輯)...*")
+    send_telegram_msg("🔍 *Bitget 3D 壓力測試掃描...*\n條件：開盤 < 壓力 且 最高 >= 壓力")
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
 
     try:
@@ -27,14 +27,12 @@ def check_bitget_signals():
         hit_symbols = []
         for symbol in symbols:
             try:
-                # 1. 抓取日K線 (1D) 數據
+                # 1. 抓取日K線 (1D) 數據進行手動封裝 (確保 1/1 對齊)
                 ohlcv_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=60)
                 df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                 df_1d['date'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True)
                 
-                # 2. 手動計算分組編號 (Group ID)
-                # 邏輯：年份 + ((該日在該年的第幾天 - 1) // 3)
-                # 這樣 1/1, 1/2, 1/3 會分在同一組；1/1 永遠是新的一組
+                # 2. 1/1 重啟邏輯分組
                 df_1d['year'] = df_1d['date'].dt.year
                 df_1d['day_of_year'] = df_1d['date'].dt.dayofyear
                 df_1d['group'] = df_1d['year'].astype(str) + "_" + ((df_1d['day_of_year'] - 1) // 3).astype(str)
@@ -52,39 +50,39 @@ def check_bitget_signals():
                 
                 # --- 判斷邏輯 ---
                 latest_3d = df_3d.iloc[-1]
+                latest_open = latest_3d['open']
                 latest_high = latest_3d['high']
-                latest_close = latest_3d['close']
                 
-                # 往前 8 根 3D K棒 (Index -9 到 -2)
+                # 往前 8 根 3D K棒 (不含當前) 找出第二低點作為「壓力」
                 lookback_3d = df_3d.iloc[-9:-1]
                 if len(lookback_3d) < 8: continue
                 
+                # 取得第二低點
                 sorted_3d = lookback_3d.sort_values(by='low').reset_index(drop=True)
+                sec_low_p = sorted_3d.loc[1, 'low']
+                sec_low_d = sorted_3d.loc[1, 'date_str']
                 
-                low_p, low_d = sorted_3d.loc[0, 'low'], sorted_3d.loc[0, 'date_str']
-                sec_p, sec_d = sorted_3d.loc[1, 'low'], sorted_3d.loc[1, 'date_str']
-                third_p = sorted_3d.loc[2, 'low']
-                
-                # 條件：最高碰過二低，且收盤低於三低
-                if latest_high >= sec_p and latest_close < third_p:
+                # --- 執行條件 ---
+                # 1. 開盤價 < 第二低點 (壓力)
+                # 2. 最高價 >= 第二低點 (觸碰壓力)
+                if latest_open < sec_low_p and latest_high >= sec_low_p:
                     clean_name = symbol.split(':')[0]
                     hit_symbols.append(
                         f"• `{clean_name:10}`\n"
-                        f"  最低: `{low_d}` / `{low_p}`\n"
-                        f"  二低: `{sec_d}` / `{sec_p}`"
+                        f"  壓力: `{sec_low_p}` (`{sec_low_d}`)"
                     )
                 
-                time.sleep(0.12)
+                time.sleep(0.1)
             except:
                 continue
 
         if hit_symbols:
-            for i in range(0, len(hit_symbols), 25):
-                msg = "✅ *自定義 3D 掃描結果 (1/1 起算):*\n\n" + "\n".join(hit_symbols[i:i + 25])
+            for i in range(0, len(hit_symbols), 30):
+                msg = "✅ *3D 壓力位觸碰結果 (1/1 起算):*\n\n" + "\n".join(hit_symbols[i:i + 30])
                 send_telegram_msg(msg)
                 time.sleep(1)
         else:
-            send_telegram_msg("⚠️ 目前無符合條件品種。")
+            send_telegram_msg("⚠️ 目前無符合觸碰壓力條件之品種。")
 
     except Exception as e:
         send_telegram_msg(f"❌ 錯誤: {str(e)}")
