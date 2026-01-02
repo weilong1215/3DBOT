@@ -17,7 +17,7 @@ def send_telegram_msg(message):
         pass
 
 def check_bitget_signals():
-    send_telegram_msg("🔍 *Bitget 3D+3H 進階過濾掃描...*\n條件：最高碰壓力，且排除已達 1:2 者")
+    send_telegram_msg("🔍 *Bitget 3D+3H 全狀態掃描...*\n標註：尚未進場 / 進行中 / 已抵達")
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
 
     try:
@@ -51,51 +51,47 @@ def check_bitget_signals():
                 # 2. 鑽取 3H 數據
                 ohlcv_3h = exchange.fetch_ohlcv(symbol, timeframe='3h', limit=40)
                 df_3h = pd.DataFrame(ohlcv_3h, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                
-                # 只看當前這根 3D 區間內的 3H
                 current_3h_set = df_3h[df_3h['ts'] >= latest_3d['ts']].copy()
 
                 entry_price = None
-                is_over_1_to_2 = False
+                status_tag = "(尚未進場)"
                 
-                # 3. 模擬交易與過濾邏輯
+                # 3. 模擬交易邏輯
                 for i, row in current_3h_set.iterrows():
                     if entry_price is None:
                         if row['close'] > pressure_p: # 找到進場點
                             entry_price = row['close']
                             stop_loss = row['low']
                             risk = entry_price - stop_loss
-                            target_price = entry_price + (risk * 2) if risk > 0 else 999999999
+                            target_price = entry_price + (risk * 2) if risk > 0 else entry_price * 100
+                            status_tag = "(進行中)"
                     else:
-                        # 已經進場，檢查之後是否碰過 1:2
+                        # 已經進場，檢查是否碰過 1:2
                         if row['high'] >= target_price:
-                            is_over_1_to_2 = True
+                            status_tag = "(已抵達)"
                             break
                 
-                # --- 最終篩選 ---
-                # 符合的情況：
-                # A: 根本還沒出現 3H 進場點 (還在壓力附近磨)
-                # B: 出現了進場點，但最高價還沒摸到 1:2
-                if not is_over_1_to_2:
-                    clean_name = symbol.split(':')[0]
-                    entry_info = f"已進場({entry_price:.4f})" if entry_price else "尚未進場"
-                    
-                    hit_symbols.append(
-                        f"• `{clean_name:10}` ({entry_info})\n"
-                        f"  壓力: `{pressure_p}` (`{pressure_d}`)"
-                    )
+                # 4. 格式化輸出
+                clean_name = symbol.split(':')[0]
+                hit_symbols.append(
+                    f"• `{clean_name:10}` {status_tag}\n"
+                    f"  壓力: `{pressure_p}` (`{pressure_d}`)"
+                )
 
-                time.sleep(0.1)
+                time.sleep(0.05) # 稍微加快掃描速度
             except Exception:
                 continue
 
         if hit_symbols:
+            # 排序：讓尚未進場和進行中的排在前面
+            hit_symbols.sort(key=lambda x: ("已抵達" in x))
+            
             for i in range(0, len(hit_symbols), 25):
-                msg = "✅ *3D 壓力觸碰 (過濾已達 1:2 者):*\n\n" + "\n".join(hit_symbols[i:i + 25])
+                msg = "✅ *3D 壓力監控結果 (1/1 起算):*\n\n" + "\n".join(hit_symbols[i:i + 25])
                 send_telegram_msg(msg)
                 time.sleep(1)
         else:
-            send_telegram_msg("⚠️ 目前無符合條件之品種。")
+            send_telegram_msg("⚠️ 目前無符合觸碰壓力之品種。")
 
     except Exception as e:
         send_telegram_msg(f"❌ 錯誤: {str(e)}")
