@@ -1,27 +1,32 @@
 name: Bitget Strategy Bot
 on:
   schedule:
-    - cron: '0 0,3,6,9,12,15,18,21 * * *' # 台灣時間 08:00 開始每3小時
+    - cron: '0 0,3,6,9,12,15,18,21 * * *'
   workflow_dispatch:
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    permissions: # 賦予寫入權限
+      contents: write
     steps:
       - uses: actions/checkout@v3
+        with:
+          persist-credentials: true
+
       - uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+
       - run: pip install ccxt pandas requests
-      - name: Load Cache
-        uses: actions/cache@v3
-        with:
-          path: last_symbols.txt
-          key: symbols-cache-${{ github.run_id }}
-          restore-keys: symbols-cache-
-      - run: python main.py
-      - name: Save Cache
-        if: always()
-        uses: actions/cache@v3
-        with:
-          path: last_symbols.txt
-          key: symbols-cache-${{ github.run_id }}
+
+      - name: Run Script
+        run: python main.py
+
+      - name: Commit and Push if changed
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add last_symbols.txt
+          # 只有在檔案有變動時才提交，避免報錯
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update last_symbols" && git push)
