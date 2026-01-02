@@ -47,7 +47,7 @@ def check_bitget_signals():
                 df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                 
                 # 條件：24H交易量 > 1000 USDT
-                if df_1d['vol'].iloc[-1] < 1000: continue
+                if df_1d['vol'].iloc[-1] < 5000: continue
                 
                 df_1d['date'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True)
                 df_1d['group'] = df_1d['date'].dt.year.astype(str) + "_" + ((df_1d['date'].dt.dayofyear - 1) // 3).astype(str)
