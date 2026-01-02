@@ -30,7 +30,7 @@ def save_current_symbols(symbols):
             f.write(f"{s}\n")
 
 def check_bitget_signals():
-    send_telegram_msg("🔍 *策略掃描中...* (開盤/每3小時排程)")
+    send_telegram_msg("🔍 *策略掃描中...* (盈虧比 1:3 版)")
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
     last_symbols = load_last_symbols()
 
@@ -46,7 +46,7 @@ def check_bitget_signals():
                 if not ohlcv_1d: continue
                 df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                 
-                # 條件：24H交易量 > 1000 USDT
+                # 條件：24H 交易量 > 5000 USDT
                 if df_1d['vol'].iloc[-1] < 5000: continue
                 
                 df_1d['date'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True)
@@ -83,7 +83,8 @@ def check_bitget_signals():
                     if entry is None:
                         if bar['close'] > item['p_price']:
                             entry, sl = bar['close'], bar['low']
-                            target = entry + ((entry - sl) * 2) if entry > sl else entry * 10
+                            # 關鍵修改：盈虧比改為 1:3
+                            target = entry + ((entry - sl) * 3) if entry > sl else entry * 10
                     else:
                         if bar['high'] >= target: is_comp = True; break
                         if bar['low'] <= sl: entry = None # 觸碰止損重置
@@ -106,7 +107,7 @@ def check_bitget_signals():
             send_telegram_msg("💎 *【頁面 2: 持續持有】*\n\n" + "\n".join([current_data[s] for s in hold_s]))
 
         if rem_s:
-            send_telegram_msg("🚫 *【頁面 3: 本次刪除】*\n(已達標/已止損/條件消失)\n\n" + "\n".join([f"• `{s}`" for s in rem_s]))
+            send_telegram_msg("🚫 *【頁面 3: 本次刪除】*\n(已達標1:3/已止損/條件消失)\n\n" + "\n".join([f"• `{s}`" for s in rem_s]))
 
         save_current_symbols(current_symbols)
     except Exception as e:
