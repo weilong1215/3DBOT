@@ -1,30 +1,20 @@
-name: Bitget Scan Bot
+name: Bitget Auto Scan
 
 on:
   schedule:
-    # 設定定時觸發 (UTC 時間)，例如 02:00 UTC 是台灣時間 10:00 AM
-    - cron: '0 2 * * *'
-  workflow_dispatch: # 允許你手動點擊按鈕執行
+    - cron: '0 2 * * *' # 每天台灣時間 10:00 自動執行
+  workflow_dispatch:      # 允許你手動按鈕執行
 
 jobs:
-  build:
+  run-bot:
     runs-on: ubuntu-latest
     steps:
-      - name: 複製代碼
-        uses: actions/checkout@v3
-
-      - name: 設定 Python
+      - uses: actions/checkout@v3
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-
-      - name: 安裝套件
-        run: |
-          pip install -r requirements.txt
-
-      - name: 執行掃描腳本
-        env:
-          # 這裡會讀取 GitHub 內儲存的秘密金鑰
-          TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run script
         run: python main.py
