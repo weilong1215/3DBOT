@@ -30,7 +30,7 @@ def save_current_symbols(symbols):
             f.write(f"{s}\n")
 
 def check_bitget_signals():
-    send_telegram_msg("🔍 *策略掃描中...* (盈虧比 1:3 版)")
+    send_telegram_msg("🔍 *策略掃描中...* (1:3 格式更新版)")
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
     last_symbols = load_last_symbols()
 
@@ -38,7 +38,6 @@ def check_bitget_signals():
         markets = exchange.load_markets()
         symbols = [s for s, m in markets.items() if m.get('linear') and m.get('type') == 'swap' and m.get('quote') == 'USDT']
         
-        # 第一階段：3D 篩選
         pre_selected = []
         for symbol in symbols:
             try:
@@ -46,7 +45,6 @@ def check_bitget_signals():
                 if not ohlcv_1d: continue
                 df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                 
-                # 條件：24H 交易量 > 5000 USDT
                 if df_1d['vol'].iloc[-1] < 5000: continue
                 
                 df_1d['date'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True)
@@ -63,7 +61,6 @@ def check_bitget_signals():
                 time.sleep(0.01)
             except: continue
 
-        # 第二階段：1H 轉 3H 深度檢查
         current_data = {}
         for item in pre_selected:
             try:
@@ -83,31 +80,33 @@ def check_bitget_signals():
                     if entry is None:
                         if bar['close'] > item['p_price']:
                             entry, sl = bar['close'], bar['low']
-                            # 關鍵修改：盈虧比改為 1:3
                             target = entry + ((entry - sl) * 3) if entry > sl else entry * 10
                     else:
                         if bar['high'] >= target: is_comp = True; break
-                        if bar['low'] <= sl: entry = None # 觸碰止損重置
+                        if bar['low'] <= sl: entry = None 
                 
                 if entry and not is_comp:
-                    clean_name = item['symbol'].split(':')[0]
-                    current_data[clean_name] = f"•`{clean_name}`/壓力: `{item['p_price']}` (`{item['p_date']}`)\n  進場: `{entry:.4f}` / 止損: `{sl:.4f}`"
+                    clean_name = item['symbol']
+                    current_data[clean_name] = (
+                        f"•{clean_name}\n"
+                        f"壓力: `{item['p_price']}` (`{item['p_date']}`)\n"
+                        f"進場: `{entry:.4f}` / 止損: `{sl:.4f}`"
+                    )
             except: continue
 
-        # --- 三頁面比對邏輯 ---
         current_symbols = set(current_data.keys())
         new_s = current_symbols - last_symbols
         hold_s = current_symbols & last_symbols
         rem_s = last_symbols - current_symbols
 
         if new_s:
-            send_telegram_msg("🆕 *【頁面 1: 新增訊號】*\n\n" + "\n".join([current_data[s] for s in new_s]))
+            send_telegram_msg("🆕 *【頁面 1: 新增訊號】*\n\n" + "\n\n".join([current_data[s] for s in new_s]))
         
         if hold_s:
-            send_telegram_msg("💎 *【頁面 2: 持續持有】*\n\n" + "\n".join([current_data[s] for s in hold_s]))
+            send_telegram_msg("💎 *【頁面 2: 持續持有】*\n\n" + "\n\n".join([current_data[s] for s in hold_s]))
 
         if rem_s:
-            send_telegram_msg("🚫 *【頁面 3: 本次刪除】*\n(已達標1:3/已止損/條件消失)\n\n" + "\n".join([f"• `{s}`" for s in rem_s]))
+            send_telegram_msg("🚫 *【頁面 3: 本次刪除】*\n\n" + "\n".join([f"• `{s}`" for s in rem_s]))
 
         save_current_symbols(current_symbols)
     except Exception as e:
