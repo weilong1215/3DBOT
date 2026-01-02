@@ -17,7 +17,7 @@ def send_telegram_msg(message):
         pass
 
 def check_bitget_signals():
-    send_telegram_msg("🔍 *Bitget 3D+3H 進階策略掃描...*\n條件：3H收盤破壓力，且盈虧比未達1:2")
+    send_telegram_msg("🔍 *Bitget 3D+3H 進階過濾掃描...*\n條件：最高碰壓力，且排除已達 1:2 者")
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
 
     try:
@@ -27,7 +27,7 @@ def check_bitget_signals():
         hit_symbols = []
         for symbol in symbols:
             try:
-                # 1. 抓取日K封裝 3D (1/1 重啟邏輯)
+                # 1. 抓取日K封裝 3D
                 ohlcv_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=60)
                 df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                 df_1d['date'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True)
@@ -44,47 +44,45 @@ def check_bitget_signals():
                 pressure_p = sorted_3d.loc[1, 'low']
                 pressure_d = sorted_3d.loc[1, 'date'].strftime('%m/%d')
 
-                # 基礎條件：3D開盤在壓力下，且3D最高有碰壓力
+                # 基礎條件：3D最高有碰壓力，且開盤在壓力下
                 if not (latest_3d['open'] < pressure_p and latest_3d['high'] >= pressure_p):
                     continue
 
-                # 2. 鑽取 3H 數據 (抓取本根 3D 區間內的 3H K棒)
-                # 為了確保涵蓋這 3 天，抓取 30 根 3H K棒
-                ohlcv_3h = exchange.fetch_ohlcv(symbol, timeframe='3h', limit=30)
+                # 2. 鑽取 3H 數據
+                ohlcv_3h = exchange.fetch_ohlcv(symbol, timeframe='3h', limit=40)
                 df_3h = pd.DataFrame(ohlcv_3h, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                 
-                # 過濾出屬於目前這根 3D 區間內的 3H K棒
-                start_ts = latest_3d['ts']
-                current_3h_set = df_3h[df_3h['ts'] >= start_ts].copy()
+                # 只看當前這根 3D 區間內的 3H
+                current_3h_set = df_3h[df_3h['ts'] >= latest_3d['ts']].copy()
 
                 entry_price = None
-                stop_loss = None
-                is_hit_target = False
-
-                # 3. 模擬交易邏輯
+                is_over_1_to_2 = False
+                
+                # 3. 模擬交易與過濾邏輯
                 for i, row in current_3h_set.iterrows():
-                    # 尚未進場，尋找第一根收盤破壓力的 3H
                     if entry_price is None:
-                        if row['close'] > pressure_p:
+                        if row['close'] > pressure_p: # 找到進場點
                             entry_price = row['close']
                             stop_loss = row['low']
                             risk = entry_price - stop_loss
-                            # 避免分母為 0 (平盤)
                             target_price = entry_price + (risk * 2) if risk > 0 else 999999999
                     else:
-                        # 已進場，檢查之後的 K 棒最高價是否碰過 1:2 目標
+                        # 已經進場，檢查之後是否碰過 1:2
                         if row['high'] >= target_price:
-                            is_hit_target = True
+                            is_over_1_to_2 = True
                             break
                 
-                # 篩選結果：必須已進場 (3H收盤破壓力)，且尚未碰觸過 1:2
-                if entry_price and not is_hit_target:
+                # --- 最終篩選 ---
+                # 符合的情況：
+                # A: 根本還沒出現 3H 進場點 (還在壓力附近磨)
+                # B: 出現了進場點，但最高價還沒摸到 1:2
+                if not is_over_1_to_2:
                     clean_name = symbol.split(':')[0]
+                    entry_info = f"已進場({entry_price:.4f})" if entry_price else "尚未進場"
+                    
                     hit_symbols.append(
-                        f"• `{clean_name:10}`\n"
-                        f"  壓力: `{pressure_p}` (`{pressure_d}`)\n"
-                        f"  進場點: `{entry_price:.4f}`\n"
-                        f"  止損點: `{stop_loss:.4f}`"
+                        f"• `{clean_name:10}` ({entry_info})\n"
+                        f"  壓力: `{pressure_p}` (`{pressure_d}`)"
                     )
 
                 time.sleep(0.1)
@@ -92,8 +90,8 @@ def check_bitget_signals():
                 continue
 
         if hit_symbols:
-            for i in range(0, len(hit_symbols), 20):
-                msg = "✅ *3D+3H 策略符合清單 (未達 1:2):*\n\n" + "\n".join(hit_symbols[i:i + 20])
+            for i in range(0, len(hit_symbols), 25):
+                msg = "✅ *3D 壓力觸碰 (過濾已達 1:2 者):*\n\n" + "\n".join(hit_symbols[i:i + 25])
                 send_telegram_msg(msg)
                 time.sleep(1)
         else:
