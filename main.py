@@ -2,6 +2,7 @@ import ccxt
 import pandas as pd
 import requests
 import time
+from datetime import datetime
 
 # --- 設定資訊 ---
 TELEGRAM_TOKEN = '8320176690:AAFSLaveCTTRWDygX1FZdkeHLi2UnxPtfO0' 
@@ -12,11 +13,12 @@ def send_telegram_msg(message):
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
         requests.post(url, json=payload, timeout=20)
-    except Exception as e:
-        print(f"發送失敗: {e}")
+    except:
+        pass
 
 def check_bitget_signals():
-    send_telegram_msg("🚀 *開始掃描 Bitget 永續合約...*\n條件：二低 <= 最新K棒最高價 < 三低")
+    # 啟動時的簡短通知
+    send_telegram_msg("🔍 *Bitget 3D 掃描中...*")
     
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
 
@@ -24,68 +26,59 @@ def check_bitget_signals():
         markets = exchange.load_markets()
         symbols = [s for s, m in markets.items() if m.get('linear') and m.get('type') == 'swap' and m.get('quote') == 'USDT']
         
-        total = len(symbols)
         hit_symbols = []
-        processed = 0
-        
         for symbol in symbols:
             try:
-                # 獲取 3D K線
                 ohlcv = exchange.fetch_ohlcv(symbol, timeframe='3d', limit=15)
-                if len(ohlcv) < 10: 
-                    processed += 1
-                    continue
+                if len(ohlcv) < 10: continue
                 
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['date'] = df['timestamp'].apply(lambda x: datetime.fromtimestamp(x/1000).strftime('%m/%d'))
                 
-                # --- 核心邏輯變更 ---
-                # 取得最新一根 3D K 棒的最高價 (High)
                 latest_high = df['high'].iloc[-1]
                 latest_close = df['close'].iloc[-1]
                 
-                # 取得過去 8 根 K 棒的最低價列表 (Index -9 到 -2)
-                lookback_lows = df['low'].iloc[-9:-1].tolist()
-                sorted_lows = sorted(lookback_lows)
+                # 取得過去 8 根 K 棒的數據 (Index -9 到 -2)
+                lookback_df = df.iloc[-9:-1].copy()
                 
-                second_lowest = sorted_lows[1]
-                third_lowest = sorted_lows[2]
+                # 排序找出最低與第二低點
+                sorted_df = lookback_df.sort_values(by='low').reset_index(drop=True)
                 
-                # 條件：
-                # 1. 最新 K 棒最高價 >= 第二低點 (代表有碰觸到或超過)
-                # 2. 最新 K 棒最高價 < 第三低點 (代表還沒漲到第三低點的壓力位)
-                if latest_high >= second_lowest and latest_high < third_lowest:
+                lowest_p = sorted_df.loc[0, 'low']
+                lowest_d = sorted_df.loc[0, 'date']
+                
+                second_p = sorted_df.loc[1, 'low']
+                second_d = sorted_df.loc[1, 'date']
+                
+                third_p = sorted_df.loc[2, 'low'] # 用於邏輯判斷
+                
+                # --- 核心條件 ---
+                # 1. 最高價碰過二低 (latest_high >= second_p)
+                # 2. 目前價格未過三低 (latest_close < third_p)
+                if latest_high >= second_p and latest_close < third_p:
                     clean_name = symbol.split(':')[0]
                     hit_symbols.append(
                         f"• `{clean_name:10}`\n"
-                        f"  最新最高: `{latest_high}`\n"
-                        f"  最新收盤: `{latest_close}`\n"
-                        f"  二低價格: `{second_lowest}`\n"
-                        f"  三低價格: `{third_lowest}`"
+                        f"  最低: `{lowest_d}` / `{lowest_p}`\n"
+                        f"  二低: `{second_d}` / `{second_p}`"
                     )
-                
-                processed += 1
-                if processed % 100 == 0:
-                    print(f"進度: {processed}/{total}...")
                 
                 time.sleep(0.1) 
             except:
-                processed += 1
                 continue
 
-        # 結果彙整
-        report_header = f"📊 *掃描完成 (3D 級別)*\n總檢查: {total} 個合約\n"
-        
+        # 結果發送
         if hit_symbols:
-            send_telegram_msg(report_header + "✅ *符合觸碰二低且未達三低者:*")
-            for i in range(0, len(hit_symbols), 15):
-                chunk = "\n".join(hit_symbols[i:i + 15])
-                send_telegram_msg(chunk)
+            # 每 25 個幣分一段，保持簡潔
+            for i in range(0, len(hit_symbols), 25):
+                msg = "✅ *3D 掃描結果 (二低 < 最高 & 現價 < 三低):*\n\n" + "\n".join(hit_symbols[i:i + 25])
+                send_telegram_msg(msg)
                 time.sleep(1)
         else:
-            send_telegram_msg(report_header + "⚠️ *目前無任何品種符合條件。*")
+            send_telegram_msg("⚠️ 目前無符合條件品種。")
 
     except Exception as e:
-        send_telegram_msg(f"❌ 嚴重錯誤: {str(e)}")
+        send_telegram_msg(f"❌ 錯誤: {str(e)}")
 
 if __name__ == "__main__":
     check_bitget_signals()
