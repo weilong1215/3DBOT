@@ -30,7 +30,7 @@ def save_current_symbols(symbols):
             f.write(f"{s}\n")
 
 def check_bitget_signals():
-    send_telegram_msg("🔍 *策略掃描中...* (1:3 格式更新版)")
+    send_telegram_msg("🔍 *策略掃描中...* (格式精簡版)")
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
     last_symbols = load_last_symbols()
 
@@ -86,9 +86,10 @@ def check_bitget_signals():
                         if bar['low'] <= sl: entry = None 
                 
                 if entry and not is_comp:
-                    clean_name = item['symbol']
-                    current_data[clean_name] = (
-                        f"•{clean_name}\n"
+                    # --- 關鍵修改：使用 .split(':')[0] 移除結算貨幣標記 ---
+                    display_name = item['symbol'].split(':')[0]
+                    current_data[display_name] = (
+                        f"•{display_name}\n"
                         f"壓力: `{item['p_price']}` (`{item['p_date']}`)\n"
                         f"進場: `{entry:.4f}` / 止損: `{sl:.4f}`"
                     )
@@ -106,6 +107,7 @@ def check_bitget_signals():
             send_telegram_msg("💎 *【頁面 2: 持續持有】*\n\n" + "\n\n".join([current_data[s] for s in hold_s]))
 
         if rem_s:
+            # 這裡也確保刪除清單中顯示的是精簡名稱
             send_telegram_msg("🚫 *【頁面 3: 本次刪除】*\n\n" + "\n".join([f"• `{s}`" for s in rem_s]))
 
         save_current_symbols(current_symbols)
