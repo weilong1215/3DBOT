@@ -2,7 +2,7 @@ import ccxt
 import pandas as pd
 import requests
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 # --- 設定資訊 ---
 TELEGRAM_TOKEN = '8320176690:AAFSLaveCTTRWDygX1FZdkeHLi2UnxPtfO0' 
@@ -17,9 +17,9 @@ def send_telegram_msg(message):
         pass
 
 def check_bitget_signals():
-    # 啟動時的簡短通知
-    send_telegram_msg("🔍 *Bitget 3D 掃描中...*")
+    send_telegram_msg("🔍 *Bitget 3D 掃描中 (日期修正版)...*")
     
+    # 強制使用 UTC 確保日期對齊
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
 
     try:
@@ -33,15 +33,19 @@ def check_bitget_signals():
                 if len(ohlcv) < 10: continue
                 
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['date'] = df['timestamp'].apply(lambda x: datetime.fromtimestamp(x/1000).strftime('%m/%d'))
+                
+                # 使用 datetime.fromtimestamp 並指定 UTC 時區，避免自動加 8 小時
+                df['date'] = df['timestamp'].apply(
+                    lambda x: datetime.fromtimestamp(x/1000, tz=timezone.utc).strftime('%m/%d')
+                )
                 
                 latest_high = df['high'].iloc[-1]
                 latest_close = df['close'].iloc[-1]
                 
-                # 取得過去 8 根 K 棒的數據 (Index -9 到 -2)
+                # 往前 8 根 K 棒 (Index -9 到 -2)
                 lookback_df = df.iloc[-9:-1].copy()
                 
-                # 排序找出最低與第二低點
+                # 排序
                 sorted_df = lookback_df.sort_values(by='low').reset_index(drop=True)
                 
                 lowest_p = sorted_df.loc[0, 'low']
@@ -50,11 +54,9 @@ def check_bitget_signals():
                 second_p = sorted_df.loc[1, 'low']
                 second_d = sorted_df.loc[1, 'date']
                 
-                third_p = sorted_df.loc[2, 'low'] # 用於邏輯判斷
+                third_p = sorted_df.loc[2, 'low']
                 
-                # --- 核心條件 ---
-                # 1. 最高價碰過二低 (latest_high >= second_p)
-                # 2. 目前價格未過三低 (latest_close < third_p)
+                # 判斷邏輯
                 if latest_high >= second_p and latest_close < third_p:
                     clean_name = symbol.split(':')[0]
                     hit_symbols.append(
@@ -63,15 +65,13 @@ def check_bitget_signals():
                         f"  二低: `{second_d}` / `{second_p}`"
                     )
                 
-                time.sleep(0.1) 
+                time.sleep(0.12) 
             except:
                 continue
 
-        # 結果發送
         if hit_symbols:
-            # 每 25 個幣分一段，保持簡潔
             for i in range(0, len(hit_symbols), 25):
-                msg = "✅ *3D 掃描結果 (二低 < 最高 & 現價 < 三低):*\n\n" + "\n".join(hit_symbols[i:i + 25])
+                msg = "✅ *3D 掃描結果 (UTC 日期):*\n\n" + "\n".join(hit_symbols[i:i + 25])
                 send_telegram_msg(msg)
                 time.sleep(1)
         else:
