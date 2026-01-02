@@ -1,0 +1,27 @@
+name: Bitget Strategy Bot
+on:
+  schedule:
+    - cron: '0 0,3,6,9,12,15,18,21 * * *' # 台灣時間 08:00 開始每3小時
+  workflow_dispatch:
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - run: pip install ccxt pandas requests
+      - name: Load Cache
+        uses: actions/cache@v3
+        with:
+          path: last_symbols.txt
+          key: symbols-cache-${{ github.run_id }}
+          restore-keys: symbols-cache-
+      - run: python main.py
+      - name: Save Cache
+        if: always()
+        uses: actions/cache@v3
+        with:
+          path: last_symbols.txt
+          key: symbols-cache-${{ github.run_id }}
