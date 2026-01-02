@@ -16,7 +16,7 @@ def send_telegram_msg(message):
         print(f"發送失敗: {e}")
 
 def check_bitget_signals():
-    send_telegram_msg("🚀 *開始掃描 Bitget (529+個合約)...*\n預計耗時 2-3 分鐘，請稍候。")
+    send_telegram_msg("🚀 *開始精確掃描 Bitget 永續合約...*\n條件：二級低點 < 目前價 < 三級低點")
     
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
 
@@ -30,6 +30,7 @@ def check_bitget_signals():
         
         for symbol in symbols:
             try:
+                # 獲取 3D K線
                 ohlcv = exchange.fetch_ohlcv(symbol, timeframe='3d', limit=15)
                 if len(ohlcv) < 10: 
                     processed += 1
@@ -37,35 +38,43 @@ def check_bitget_signals():
                 
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 last_close = df['close'].iloc[-1]
-                lookback_lows = df['low'].iloc[-9:-1].tolist()
-                second_lowest = sorted(lookback_lows)[1]
                 
-                if last_close > second_lowest:
+                # 取得過去 8 根 K 棒的最低價列表 (Index -9 到 -2)
+                lookback_lows = df['low'].iloc[-9:-1].tolist()
+                sorted_lows = sorted(lookback_lows)
+                
+                # 取得第二低點與第三低點
+                second_lowest = sorted_lows[1]
+                third_lowest = sorted_lows[2]
+                
+                # --- 新條件邏輯 ---
+                # 1. 收盤價 > 第二低點
+                # 2. 收盤價 < 第三低點 (如果大於第三低點則不符合)
+                if last_close > second_lowest and last_close < third_lowest:
                     clean_name = symbol.split(':')[0]
-                    hit_symbols.append(f"• `{clean_name:10}` | {last_close}")
+                    hit_symbols.append(f"• `{clean_name:10}`\n  現價: `{last_close}`\n  二低: `{second_lowest}`\n  三低: `{third_lowest}`")
                 
                 processed += 1
-                # 每掃描 100 個幣在日誌噴一次進度，避免 GitHub 認為程式卡死
                 if processed % 100 == 0:
-                    print(f"目前進度: {processed}/{total}...")
+                    print(f"進度: {processed}/{total}...")
                 
-                time.sleep(0.1) # 縮短延遲加快速度
+                time.sleep(0.1) 
             except:
                 processed += 1
                 continue
 
-        # 最後結果彙整
-        report_header = f"📊 *掃描完成 (3D 級別)*\n總計檢查: {total} 個永續合約\n"
+        # 結果彙整
+        report_header = f"📊 *掃描完成 (3D 級別)*\n總檢查: {total} 個合約\n"
         
         if hit_symbols:
-            # 如果符合的幣太多，每 30 個分一封信，防止 Telegram 訊息過長
-            send_telegram_msg(report_header + "✅ *符合條件清單如下:*")
-            for i in range(0, len(hit_symbols), 30):
-                chunk = "\n".join(hit_symbols[i:i + 30])
+            send_telegram_msg(report_header + "✅ *符合條件 (夾在二三低點間):*")
+            # 由於詳細資訊變多，每 15 個幣分一段發送
+            for i in range(0, len(hit_symbols), 15):
+                chunk = "\n".join(hit_symbols[i:i + 15])
                 send_telegram_msg(chunk)
                 time.sleep(1)
         else:
-            send_telegram_msg(report_header + "⚠️ *目前無任何品種符合條件。*")
+            send_telegram_msg(report_header + "⚠️ *目前無任何品種符合此區間條件。*")
 
     except Exception as e:
         send_telegram_msg(f"❌ 嚴重錯誤: {str(e)}")
