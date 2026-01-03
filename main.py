@@ -10,6 +10,13 @@ TELEGRAM_TOKEN = '8320176690:AAFSLaveCTTRWDygX1FZdkeHLi2UnxPtfO0'
 TELEGRAM_CHAT_ID = '1041632710'
 DB_FILE = os.path.join(os.getcwd(), "last_symbols.txt")
 
+# 定義要排除的美股/非加密貨幣代碼
+STOCK_SYMBOLS = [
+    'AAPL', 'TSLA', 'NVDA', 'AMZN', 'MSFT', 'GOOGL', 'META', 'NFLX', 
+    'BABA', 'COIN', 'MSTR', 'AMD', 'PYPL', 'DIS', 'NKE', 'INTC',
+    'V', 'MA', 'UBER', 'LYFT', 'SHOP', 'GME', 'AMC', 'PLTR', 'SNOW'
+]
+
 def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
@@ -30,14 +37,21 @@ def save_current_symbols(symbols):
             f.write(f"{s}\n")
 
 def check_bitget_signals():
-    send_telegram_msg("🔍 *策略掃描中...* (格式精簡版)")
+    send_telegram_msg("🔍 *策略掃描中...* (盈虧比 1:15 版)")
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
     last_symbols = load_last_symbols()
 
     try:
         markets = exchange.load_markets()
-        symbols = [s for s, m in markets.items() if m.get('linear') and m.get('type') == 'swap' and m.get('quote') == 'USDT']
         
+        # 篩選交易對並排除美股
+        symbols = []
+        for s, m in markets.items():
+            if m.get('linear') and m.get('type') == 'swap' and m.get('quote') == 'USDT':
+                base_symbol = s.split('/')[0]
+                if base_symbol not in STOCK_SYMBOLS:
+                    symbols.append(s)
+
         pre_selected = []
         for symbol in symbols:
             try:
@@ -45,6 +59,7 @@ def check_bitget_signals():
                 if not ohlcv_1d: continue
                 df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                 
+                # 條件：24H 交易量 > 5000 USDT
                 if df_1d['vol'].iloc[-1] < 5000: continue
                 
                 df_1d['date'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True)
@@ -80,13 +95,13 @@ def check_bitget_signals():
                     if entry is None:
                         if bar['close'] > item['p_price']:
                             entry, sl = bar['close'], bar['low']
-                            target = entry + ((entry - sl) * 3) if entry > sl else entry * 10
+                            # --- 關鍵修改：盈虧比改為 1:15 ---
+                            target = entry + ((entry - sl) * 15) if entry > sl else entry * 50
                     else:
                         if bar['high'] >= target: is_comp = True; break
                         if bar['low'] <= sl: entry = None 
                 
                 if entry and not is_comp:
-                    # --- 關鍵修改：使用 .split(':')[0] 移除結算貨幣標記 ---
                     display_name = item['symbol'].split(':')[0]
                     current_data[display_name] = (
                         f"•{display_name}\n"
@@ -107,7 +122,6 @@ def check_bitget_signals():
             send_telegram_msg("💎 *【頁面 2: 持續持有】*\n\n" + "\n\n".join([current_data[s] for s in hold_s]))
 
         if rem_s:
-            # 這裡也確保刪除清單中顯示的是精簡名稱
             send_telegram_msg("🚫 *【頁面 3: 本次刪除】*\n\n" + "\n".join([f"• `{s}`" for s in rem_s]))
 
         save_current_symbols(current_symbols)
