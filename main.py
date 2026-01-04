@@ -6,8 +6,8 @@ import os
 from datetime import datetime, timedelta
 
 # --- 設定資訊 ---
-TELEGRAM_TOKEN = '8320176690:AAFSLaveCTTRWDygX1FZdkeHLi2UnxPtfO0' 
-TELEGRAM_CHAT_ID = '1041632710'
+TELEGRAM_TOKEN = '你的_TOKEN' 
+TELEGRAM_CHAT_ID = '你的_CHAT_ID'
 DB_FILE = os.path.join(os.getcwd(), "last_symbols.txt")
 
 STOCK_SYMBOLS = ['AAPL', 'TSLA', 'NVDA', 'AMZN', 'MSFT', 'GOOGL', 'META', 'NFLX', 'BABA', 'COIN', 'MSTR', 'AMD', 'PYPL', 'DIS', 'NKE', 'INTC', 'V', 'MA', 'UBER', 'LYFT', 'SHOP', 'GME', 'AMC', 'PLTR', 'SNOW']
@@ -15,14 +15,12 @@ STOCK_SYMBOLS = ['AAPL', 'TSLA', 'NVDA', 'AMZN', 'MSFT', 'GOOGL', 'META', 'NFLX'
 def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    try:
-        requests.post(url, json=payload, timeout=20)
+    try: requests.post(url, json=payload, timeout=20)
     except: pass
 
 def load_last_symbols():
     if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f:
-            return set(line.strip() for line in f.readlines() if line.strip())
+        with open(DB_FILE, "r") as f: return set(line.strip() for line in f.readlines() if line.strip())
     return set()
 
 def save_current_symbols(symbols):
@@ -30,7 +28,9 @@ def save_current_symbols(symbols):
         for s in symbols: f.write(f"{s}\n")
 
 def check_bitget_signals():
-    send_telegram_msg("🔍 *策略掃描中...* (原始價格精準版)")
+    now_tt = datetime.now().strftime('%m/%d %H:%M')
+    send_telegram_msg(f"🔍 *策略掃描中...* \n基準時間: `{now_tt}`\n(壓力位動態更新)")
+    
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
     last_symbols = load_last_symbols()
 
@@ -41,56 +41,62 @@ def check_bitget_signals():
         pre_selected = []
         for symbol in symbols:
             try:
-                ohlcv_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=31)
+                # 抓取較多天數確保 3D 計算精確
+                ohlcv_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=40)
                 if not ohlcv_1d: continue
-                df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).iloc[:-1]
-                if df_1d['vol'].iloc[-1] < 5000: continue
+                df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                 
                 df_1d['date'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True)
-                df_1d['group'] = df_1d['date'].dt.year.astype(str) + "_" + ((df_1d['date'].dt.dayofyear - 1) // 3).astype(str)
-                df_3d = df_1d.groupby('group').agg({'date':'first','open':'first','high':'max','low':'min','close':'last','ts':'first'}).sort_values('date').reset_index(drop=True)
+                # 修正分組：以 1/1 為基準，每 3 天一組
+                df_1d['group'] = ((df_1d['date'].dt.dayofyear - 1) // 3)
                 
-                if len(df_3d) < 9: continue
+                df_3d = df_1d.groupby('group').agg({
+                    'date':'first', 'open':'first', 'high':'max', 'low':'min', 'close':'last', 'ts':'first'
+                }).sort_values('date').reset_index(drop=True)
+                
+                if len(df_3d) < 10: continue
+                
+                # --- 動態抓取邏輯 ---
+                # latest_3d: 包含今天的當前 3D 區間 (例如 1/4~1/6)
                 latest_3d = df_3d.iloc[-1]
+                # lookback_3d: 緊鄰當前區間之前的 8 根 3D K棒 (例如 1/1~1/3, 12/29~12/31...)
                 lookback_3d = df_3d.iloc[-9:-1]
+                
+                # 重新計算這 8 根的次低點作為新壓力
                 sorted_3d = lookback_3d.sort_values(by='low').reset_index(drop=True)
                 p_price = sorted_3d.loc[1, 'low']
                 p_date = sorted_3d.loc[1, 'date'].strftime('%m/%d')
 
+                # 條件：開盤價在壓力下，且最高價曾觸及壓力
                 if latest_3d['open'] < p_price and latest_3d['high'] >= p_price:
                     pre_selected.append({'symbol': symbol, 'p_price': p_price, 'p_date': p_date, 'start_ts': latest_3d['ts']})
+                
                 time.sleep(0.01)
             except: continue
 
         current_data = {}
         for item in pre_selected:
             try:
-                time.sleep(0.3)
-                ohlcv_1h = exchange.fetch_ohlcv(item['symbol'], timeframe='1h', limit=150)
+                time.sleep(0.2)
+                ohlcv_1h = exchange.fetch_ohlcv(item['symbol'], timeframe='1h', limit=100)
                 df_1h = pd.DataFrame(ohlcv_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).iloc[:-1]
-                
                 df_1h['dt'] = pd.to_datetime(df_1h['ts'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
+                
                 start_dt = pd.to_datetime(item['start_ts'], unit='ms', utc=True).tz_convert('Asia/Taipei')
                 df_1h = df_1h[df_1h['dt'] >= start_dt].reset_index(drop=True)
 
                 df_1h.set_index('dt', inplace=True)
-                # 固定台灣時間 08:00 開始每 3 小時一組
                 resampler = df_1h.resample('3H', origin='start_day', offset='8h')
                 
                 entry, sl, target, is_comp = None, None, None, False
-                
                 for label, group in resampler:
                     if len(group) < 3: continue 
-                    
                     last_bar = group.iloc[-1]
-                    
                     if entry is None:
                         if last_bar['close'] > item['p_price']:
                             entry = last_bar['close']
                             sl = group['low'].min()
-                            risk = entry - sl
-                            # 1:15 目標
-                            target = entry + (risk * 15) if risk > 0 else entry * 50
+                            target = entry + ((entry - sl) * 15) if entry > sl else entry * 50
                     else:
                         for _, bar in group.iterrows():
                             if bar['high'] >= target: is_comp = True; break
@@ -99,12 +105,7 @@ def check_bitget_signals():
                 
                 if entry and not is_comp:
                     display_name = item['symbol'].split(':')[0]
-                    # 修改：移除 :.4f，使用原始數值，避免四捨五入
-                    current_data[display_name] = (
-                        f"•{display_name}\n"
-                        f"壓力: `{item['p_price']}` (`{item['p_date']}`)\n"
-                        f"進場: `{entry}` / 止損: `{sl}`"
-                    )
+                    current_data[display_name] = f"•{display_name}\n壓力: `{item['p_price']}` (`{item['p_date']}`)\n進場: `{entry}` / 止損: `{sl}`"
             except: continue
 
         current_symbols = set(current_data.keys())
