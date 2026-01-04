@@ -5,7 +5,7 @@ import time
 import os
 from datetime import datetime, timedelta
 
-# --- 設定資訊 ---
+# --- 使用您的設定 ---
 TELEGRAM_TOKEN = '8320176690:AAFSLaveCTTRWDygX1FZdkeHLi2UnxPtfO0' 
 TELEGRAM_CHAT_ID = '1041632710'
 DB_FILE = os.path.join(os.getcwd(), "last_symbols.txt")
@@ -28,8 +28,8 @@ def save_current_symbols(symbols):
         for s in symbols: f.write(f"{s}\n")
 
 def check_bitget_signals():
-    now_str = datetime.now().strftime('%m/%d %H:%M')
-    send_telegram_msg(f"🚀 *開始全市場掃描* (已移除開盤價限制)\n當前時間: `{now_str}`")
+    now_tw = datetime.now()
+    send_telegram_msg(f"📅 *開始掃描 (1/4 日期對齊版)* \n目前時間: `{now_tw.strftime('%Y-%m-%d %H:%M')}`")
     
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
     last_symbols = load_last_symbols()
@@ -41,38 +41,40 @@ def check_bitget_signals():
         pre_selected = []
         for symbol in symbols:
             try:
-                # 抓取較多天數確保 3D 計算精確
                 ohlcv_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=60)
                 if not ohlcv_1d: continue
                 df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                 
-                # 改用更靈活的 3D 滾動分組：每 3 根 1D 合併成一根 3D
-                # 倒著分組，確保最後一根（包含今天）永遠是獨立的一組
-                df_1d = df_1d.iloc[::-1].reset_index(drop=True)
-                df_1d['group'] = df_1d.index // 3
-                df_3d = df_1d.groupby('group').agg({
-                    'ts': 'last', 'open': 'last', 'high': 'max', 'low': 'min', 'close': 'first'
-                }).sort_values('ts').reset_index(drop=True)
+                # --- 關鍵修正：嚴格日期分組 ---
+                df_1d['dt'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
+                df_1d.set_index('dt', inplace=True)
                 
-                # 轉回正向時間順序
-                df_3d['date'] = pd.to_datetime(df_3d['ts'], unit='ms', utc=True)
+                # 以 2026-01-01 為起點，每 3 天切一根 3D
+                resampler_3d = df_1d.resample('3D', origin=pd.Timestamp('2026-01-01').tz_localize('Asia/Taipei'))
+                df_3d = resampler_3d.agg({
+                    'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'ts': 'first'
+                }).dropna().reset_index()
                 
                 if len(df_3d) < 10: continue
                 
-                # 當前這組 3D (包含 1/4)
+                # latest_3d 就是 1/4-1/6 這組 (如果今天 >= 1/4)
                 latest_3d = df_3d.iloc[-1]
-                # 之前的 8 組 3D
+                # lookback_3d 就是前 8 組 (包含 1/1-1/3)
                 lookback_3d = df_3d.iloc[-9:-1]
                 
-                # 計算新壓力位 (次低點)
+                # 計算壓力位 (次低點)
                 sorted_3d = lookback_3d.sort_values(by='low').reset_index(drop=True)
                 p_price = sorted_3d.loc[1, 'low']
-                p_date = sorted_3d.loc[1, 'date'].strftime('%m/%d')
+                p_date = sorted_3d.loc[1, 'dt'].strftime('%m/%d')
 
-                # 修改：移除開盤價限制，只要最高價摸到壓力位就進入 3H 檢查
+                # 判定：當前 3D 週期內（1/4開始）最高價有摸過壓力
                 if latest_3d['high'] >= p_price:
-                    pre_selected.append({'symbol': symbol, 'p_price': p_price, 'p_date': p_date, 'start_ts': latest_3d['ts'] - (2*24*60*60*1000)}) # 往前回溯 2 天確保抓到這組 3D 的開頭
-                
+                    pre_selected.append({
+                        'symbol': symbol, 
+                        'p_price': p_price, 
+                        'p_date': p_date, 
+                        'start_ts': latest_3d['ts']
+                    })
                 time.sleep(0.01)
             except: continue
 
@@ -84,11 +86,12 @@ def check_bitget_signals():
                 df_1h = pd.DataFrame(ohlcv_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).iloc[:-1]
                 df_1h['dt'] = pd.to_datetime(df_1h['ts'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
                 
-                # 確保 1H 從這組 3D 的起始時間開始看
+                # 僅處理 1/4 08:00 以後的資料
                 start_dt = pd.to_datetime(item['start_ts'], unit='ms', utc=True).tz_convert('Asia/Taipei')
-                df_1h = df_1h[df_1h['dt'] >= (start_dt - timedelta(hours=8))].reset_index(drop=True)
+                df_1h = df_1h[df_1h['dt'] >= start_dt].reset_index(drop=True)
 
                 df_1h.set_index('dt', inplace=True)
+                # 3H 確認區間 (08-11, 11-14...)
                 resampler = df_1h.resample('3H', origin='start_day', offset='8h')
                 
                 entry, sl, target, is_comp = None, None, None, False
@@ -111,14 +114,14 @@ def check_bitget_signals():
                     current_data[display_name] = f"•{display_name}\n壓力: `{item['p_price']}` (`{item['p_date']}`)\n進場: `{entry}` / 止損: `{sl}`"
             except: continue
 
-        # 輸出邏輯
+        # --- 輸出比對 ---
         current_symbols = set(current_data.keys())
         new_s = current_symbols - last_symbols
         hold_s = current_symbols & last_symbols
         rem_s = last_symbols - current_symbols
 
         if not current_symbols and not rem_s:
-            send_telegram_msg("☕ *掃描完畢*：未發現突破壓力之標的。")
+            send_telegram_msg("☕ *掃描完畢*：未發現 1/4 突破標的。")
         else:
             if new_s: send_telegram_msg("🆕 *【頁面 1: 新增訊號】*\n\n" + "\n\n".join([current_data[s] for s in new_s]))
             if hold_s: send_telegram_msg("💎 *【頁面 2: 持續持有】*\n\n" + "\n\n".join([current_data[s] for s in hold_s]))
