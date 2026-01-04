@@ -28,8 +28,8 @@ def save_current_symbols(symbols):
         for s in symbols: f.write(f"{s}\n")
 
 def check_bitget_signals():
-    now_tw = datetime.now()
-    send_telegram_msg(f"📅 *開始掃描 (1/4 日期對齊版)* \n目前時間: `{now_tw.strftime('%Y-%m-%d %H:%M')}`")
+    start_run = time.time()
+    send_telegram_msg(f"📅 *1/4 換軌掃描開始...*")
     
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
     last_symbols = load_last_symbols()
@@ -41,62 +41,52 @@ def check_bitget_signals():
         pre_selected = []
         for symbol in symbols:
             try:
-                ohlcv_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=60)
+                ohlcv_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=40)
                 if not ohlcv_1d: continue
                 df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                 
-                # --- 關鍵修正：嚴格日期分組 ---
+                # 以 1/1 為基準進行 3 天分組 (台灣時間)
                 df_1d['dt'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
-                df_1d.set_index('dt', inplace=True)
+                # 計算與 2026-01-01 的天數差距，每 3 天一組
+                base_date = pd.Timestamp('2026-01-01').tz_localize('Asia/Taipei')
+                df_1d['group_id'] = (df_1d['dt'] - base_date).dt.days // 3
                 
-                # 以 2026-01-01 為起點，每 3 天切一根 3D
-                resampler_3d = df_1d.resample('3D', origin=pd.Timestamp('2026-01-01').tz_localize('Asia/Taipei'))
-                df_3d = resampler_3d.agg({
-                    'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'ts': 'first'
-                }).dropna().reset_index()
+                df_3d = df_1d.groupby('group_id').agg({
+                    'dt':'first', 'open':'first', 'high':'max', 'low':'min', 'close':'last', 'ts':'first'
+                }).sort_values('dt').reset_index(drop=True)
+
+                if len(df_3d) < 9: continue
                 
-                if len(df_3d) < 10: continue
-                
-                # latest_3d 就是 1/4-1/6 這組 (如果今天 >= 1/4)
+                # 換軌：今天 (1/4) 屬於最新一根
                 latest_3d = df_3d.iloc[-1]
-                # lookback_3d 就是前 8 組 (包含 1/1-1/3)
-                lookback_3d = df_3d.iloc[-9:-1]
+                lookback_3d = df_3d.iloc[-9:-1] # 包含 1/1-1/3 那一根
                 
                 # 計算壓力位 (次低點)
                 sorted_3d = lookback_3d.sort_values(by='low').reset_index(drop=True)
                 p_price = sorted_3d.loc[1, 'low']
                 p_date = sorted_3d.loc[1, 'dt'].strftime('%m/%d')
 
-                # 判定：當前 3D 週期內（1/4開始）最高價有摸過壓力
+                # 只要目前這組 3D 有摸到壓力位就進入 1H 檢查
                 if latest_3d['high'] >= p_price:
-                    pre_selected.append({
-                        'symbol': symbol, 
-                        'p_price': p_price, 
-                        'p_date': p_date, 
-                        'start_ts': latest_3d['ts']
-                    })
-                time.sleep(0.01)
+                    pre_selected.append({'symbol': symbol, 'p_price': p_price, 'p_date': p_date, 'start_ts': latest_3d['ts']})
             except: continue
 
         current_data = {}
         for item in pre_selected:
             try:
-                time.sleep(0.2)
-                ohlcv_1h = exchange.fetch_ohlcv(item['symbol'], timeframe='1h', limit=150)
+                ohlcv_1h = exchange.fetch_ohlcv(item['symbol'], timeframe='1h', limit=100)
                 df_1h = pd.DataFrame(ohlcv_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).iloc[:-1]
-                df_1h['dt'] = pd.to_datetime(df_1h['ts'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
                 
-                # 僅處理 1/4 08:00 以後的資料
-                start_dt = pd.to_datetime(item['start_ts'], unit='ms', utc=True).tz_convert('Asia/Taipei')
-                df_1h = df_1h[df_1h['dt'] >= start_dt].reset_index(drop=True)
+                # 僅看 1/4 08:00 之後
+                df_1h = df_1h[df_1h['ts'] >= item['start_ts']].reset_index(drop=True)
+                if len(df_1h) < 3: continue 
 
-                df_1h.set_index('dt', inplace=True)
-                # 3H 確認區間 (08-11, 11-14...)
-                resampler = df_1h.resample('3H', origin='start_day', offset='8h')
-                
                 entry, sl, target, is_comp = None, None, None, False
-                for label, group in resampler:
-                    if len(group) < 3: continue 
+                # 快速模擬 3H 固定區間 (不使用 resample)
+                for i in range(0, len(df_1h) - 2, 3):
+                    group = df_1h.iloc[i : i+3]
+                    if len(group) < 3: break
+                    
                     last_bar = group.iloc[-1]
                     if entry is None:
                         if last_bar['close'] > item['p_price']:
@@ -114,20 +104,18 @@ def check_bitget_signals():
                     current_data[display_name] = f"•{display_name}\n壓力: `{item['p_price']}` (`{item['p_date']}`)\n進場: `{entry}` / 止損: `{sl}`"
             except: continue
 
-        # --- 輸出比對 ---
         current_symbols = set(current_data.keys())
         new_s = current_symbols - last_symbols
         hold_s = current_symbols & last_symbols
         rem_s = last_symbols - current_symbols
 
-        if not current_symbols and not rem_s:
-            send_telegram_msg("☕ *掃描完畢*：未發現 1/4 突破標的。")
-        else:
-            if new_s: send_telegram_msg("🆕 *【頁面 1: 新增訊號】*\n\n" + "\n\n".join([current_data[s] for s in new_s]))
-            if hold_s: send_telegram_msg("💎 *【頁面 2: 持續持有】*\n\n" + "\n\n".join([current_data[s] for s in hold_s]))
-            if rem_s: send_telegram_msg("🚫 *【頁面 3: 本次刪除】*\n\n" + "\n".join([f"• `{s}`" for s in rem_s]))
+        if new_s: send_telegram_msg("🆕 *【新增】*\n\n" + "\n\n".join([current_data[s] for s in new_s]))
+        if hold_s: send_telegram_msg("💎 *【持有】*\n\n" + "\n\n".join([current_data[s] for s in hold_s]))
+        if rem_s: send_telegram_msg("🚫 *【刪除】*\n\n" + "\n".join([f"• `{s}`" for s in rem_s]))
 
         save_current_symbols(current_symbols)
+        # 顯示耗時
+        print(f"掃描完成，耗時: {time.time() - start_run:.2f}s")
     except Exception as e:
         send_telegram_msg(f"❌ 錯誤: {str(e)}")
 
