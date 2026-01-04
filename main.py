@@ -10,20 +10,14 @@ TELEGRAM_TOKEN = '8320176690:AAFSLaveCTTRWDygX1FZdkeHLi2UnxPtfO0'
 TELEGRAM_CHAT_ID = '1041632710'
 DB_FILE = os.path.join(os.getcwd(), "last_symbols.txt")
 
-# 定義要排除的美股/非加密貨幣代碼
-STOCK_SYMBOLS = [
-    'AAPL', 'TSLA', 'NVDA', 'AMZN', 'MSFT', 'GOOGL', 'META', 'NFLX', 
-    'BABA', 'COIN', 'MSTR', 'AMD', 'PYPL', 'DIS', 'NKE', 'INTC',
-    'V', 'MA', 'UBER', 'LYFT', 'SHOP', 'GME', 'AMC', 'PLTR', 'SNOW'
-]
+STOCK_SYMBOLS = ['AAPL', 'TSLA', 'NVDA', 'AMZN', 'MSFT', 'GOOGL', 'META', 'NFLX', 'BABA', 'COIN', 'MSTR', 'AMD', 'PYPL', 'DIS', 'NKE', 'INTC', 'V', 'MA', 'UBER', 'LYFT', 'SHOP', 'GME', 'AMC', 'PLTR', 'SNOW']
 
 def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
         requests.post(url, json=payload, timeout=20)
-    except:
-        pass
+    except: pass
 
 def load_last_symbols():
     if os.path.exists(DB_FILE):
@@ -33,33 +27,23 @@ def load_last_symbols():
 
 def save_current_symbols(symbols):
     with open(DB_FILE, "w") as f:
-        for s in symbols:
-            f.write(f"{s}\n")
+        for s in symbols: f.write(f"{s}\n")
 
 def check_bitget_signals():
-    send_telegram_msg("🔍 *策略掃描中...* (盈虧比 1:15 版)")
+    send_telegram_msg("🔍 *策略掃描中...* (精確 3H 邏輯版)")
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
     last_symbols = load_last_symbols()
 
     try:
         markets = exchange.load_markets()
+        symbols = [s for s, m in markets.items() if m.get('linear') and m.get('type') == 'swap' and m.get('quote') == 'USDT' and s.split('/')[0] not in STOCK_SYMBOLS]
         
-        # 篩選交易對並排除美股
-        symbols = []
-        for s, m in markets.items():
-            if m.get('linear') and m.get('type') == 'swap' and m.get('quote') == 'USDT':
-                base_symbol = s.split('/')[0]
-                if base_symbol not in STOCK_SYMBOLS:
-                    symbols.append(s)
-
         pre_selected = []
         for symbol in symbols:
             try:
                 ohlcv_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=30)
                 if not ohlcv_1d: continue
                 df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                
-                # 條件：24H 交易量 > 5000 USDT
                 if df_1d['vol'].iloc[-1] < 5000: continue
                 
                 df_1d['date'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True)
@@ -84,30 +68,33 @@ def check_bitget_signals():
                 df_1h = pd.DataFrame(ohlcv_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                 df_1h = df_1h[df_1h['ts'] >= item['start_ts']].reset_index(drop=True)
                 
-                custom_3h = []
-                for i in range(0, len(df_1h), 3):
-                    chunk = df_1h.iloc[i:i+3]
-                    if chunk.empty: break
-                    custom_3h.append({'open': chunk.iloc[0]['open'], 'high': chunk['high'].max(), 'low': chunk['low'].min(), 'close': chunk.iloc[-1]['close']})
-                
                 entry, sl, target, is_comp = None, None, None, False
-                for bar in custom_3h:
+                
+                # 每 3 根 1H K棒作為一組
+                for i in range(0, len(df_1h), 3):
+                    chunk = df_1h.iloc[i : i+3]
+                    if len(chunk) < 3: break # 不足 3 根則跳過
+                    
+                    last_bar = chunk.iloc[-1] # 最後一根 K 棒
+                    
                     if entry is None:
-                        if bar['close'] > item['p_price']:
-                            entry, sl = bar['close'], bar['low']
-                            # --- 關鍵修改：盈虧比改為 1:15 ---
-                            target = entry + ((entry - sl) * 15) if entry > sl else entry * 50
+                        # 條件：最後一根 K 棒收盤大於壓力位
+                        if last_bar['close'] > item['p_price']:
+                            entry = last_bar['close']
+                            # 止損點：最後 2 根 K 棒的最低價 (i+1 和 i+2 索引處)
+                            sl = chunk.iloc[1:3]['low'].min()
+                            risk = entry - sl
+                            target = entry + (risk * 15) if risk > 0 else entry * 50
                     else:
-                        if bar['high'] >= target: is_comp = True; break
-                        if bar['low'] <= sl: entry = None 
+                        # 監控後續所有 1H K棒 (為了靈敏度，這裡逐根監控)
+                        for _, bar in chunk.iterrows():
+                            if bar['high'] >= target: is_comp = True; break
+                            if bar['low'] <= sl: entry = None; break
+                        if is_comp or entry is None: break
                 
                 if entry and not is_comp:
                     display_name = item['symbol'].split(':')[0]
-                    current_data[display_name] = (
-                        f"•{display_name}\n"
-                        f"壓力: `{item['p_price']}` (`{item['p_date']}`)\n"
-                        f"進場: `{entry:.4f}` / 止損: `{sl:.4f}`"
-                    )
+                    current_data[display_name] = f"•{display_name}\n壓力: `{item['p_price']}` (`{item['p_date']}`)\n進場: `{entry:.4f}` / 止損: `{sl:.4f}`"
             except: continue
 
         current_symbols = set(current_data.keys())
@@ -115,18 +102,12 @@ def check_bitget_signals():
         hold_s = current_symbols & last_symbols
         rem_s = last_symbols - current_symbols
 
-        if new_s:
-            send_telegram_msg("🆕 *【頁面 1: 新增訊號】*\n\n" + "\n\n".join([current_data[s] for s in new_s]))
-        
-        if hold_s:
-            send_telegram_msg("💎 *【頁面 2: 持續持有】*\n\n" + "\n\n".join([current_data[s] for s in hold_s]))
-
-        if rem_s:
-            send_telegram_msg("🚫 *【頁面 3: 本次刪除】*\n\n" + "\n".join([f"• `{s}`" for s in rem_s]))
+        if new_s: send_telegram_msg("🆕 *【頁面 1: 新增訊號】*\n\n" + "\n\n".join([current_data[s] for s in new_s]))
+        if hold_s: send_telegram_msg("💎 *【頁面 2: 持續持有】*\n\n" + "\n\n".join([current_data[s] for s in hold_s]))
+        if rem_s: send_telegram_msg("🚫 *【頁面 3: 本次刪除】*\n\n" + "\n".join([f"• `{s}`" for s in rem_s]))
 
         save_current_symbols(current_symbols)
-    except Exception as e:
-        send_telegram_msg(f"❌ 錯誤: {str(e)}")
+    except Exception as e: send_telegram_msg(f"❌ 錯誤: {str(e)}")
 
 if __name__ == "__main__":
     check_bitget_signals()
