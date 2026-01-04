@@ -30,7 +30,7 @@ def save_current_symbols(symbols):
         for s in symbols: f.write(f"{s}\n")
 
 def check_bitget_signals():
-    send_telegram_msg("🔍 *策略掃描中...* (止損邏輯修正版)")
+    send_telegram_msg("🔍 *策略掃描中...* (原始價格精準版)")
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
     last_symbols = load_last_symbols()
 
@@ -54,7 +54,8 @@ def check_bitget_signals():
                 latest_3d = df_3d.iloc[-1]
                 lookback_3d = df_3d.iloc[-9:-1]
                 sorted_3d = lookback_3d.sort_values(by='low').reset_index(drop=True)
-                p_price, p_date = sorted_3d.loc[1, 'low'], sorted_3d.loc[1, 'date'].strftime('%m/%d')
+                p_price = sorted_3d.loc[1, 'low']
+                p_date = sorted_3d.loc[1, 'date'].strftime('%m/%d')
 
                 if latest_3d['open'] < p_price and latest_3d['high'] >= p_price:
                     pre_selected.append({'symbol': symbol, 'p_price': p_price, 'p_date': p_date, 'start_ts': latest_3d['ts']})
@@ -84,16 +85,13 @@ def check_bitget_signals():
                     last_bar = group.iloc[-1]
                     
                     if entry is None:
-                        # 當 3H 區間結束，第 3 根收盤價站上壓力位
                         if last_bar['close'] > item['p_price']:
                             entry = last_bar['close']
-                            # --- 止損修正：取該 3H 區間內（第1, 2, 3根）的最低價 ---
                             sl = group['low'].min()
                             risk = entry - sl
-                            # 盈虧比 1:15
+                            # 1:15 目標
                             target = entry + (risk * 15) if risk > 0 else entry * 50
                     else:
-                        # 監控後續價格
                         for _, bar in group.iterrows():
                             if bar['high'] >= target: is_comp = True; break
                             if bar['low'] <= sl: entry = None; break
@@ -101,10 +99,11 @@ def check_bitget_signals():
                 
                 if entry and not is_comp:
                     display_name = item['symbol'].split(':')[0]
+                    # 修改：移除 :.4f，使用原始數值，避免四捨五入
                     current_data[display_name] = (
                         f"•{display_name}\n"
                         f"壓力: `{item['p_price']}` (`{item['p_date']}`)\n"
-                        f"進場: `{entry:.4f}` / 止損: `{sl:.4f}`"
+                        f"進場: `{entry}` / 止損: `{sl}`"
                     )
             except: continue
 
