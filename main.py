@@ -30,7 +30,7 @@ def save_current_symbols(symbols):
         for s in symbols: f.write(f"{s}\n")
 
 def check_bitget_signals():
-    send_telegram_msg("🔍 *策略掃描中...* (精確 3H 邏輯版)")
+    send_telegram_msg("🔍 *策略掃描中...* (嚴格收盤 3H 版)")
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
     last_symbols = load_last_symbols()
 
@@ -41,9 +41,11 @@ def check_bitget_signals():
         pre_selected = []
         for symbol in symbols:
             try:
-                ohlcv_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=30)
+                ohlcv_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=31)
                 if not ohlcv_1d: continue
-                df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                # 1D 也剔除最後一根未收盤的 K 棒
+                df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).iloc[:-1]
+                
                 if df_1d['vol'].iloc[-1] < 5000: continue
                 
                 df_1d['date'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True)
@@ -64,29 +66,32 @@ def check_bitget_signals():
         for item in pre_selected:
             try:
                 time.sleep(0.3)
-                ohlcv_1h = exchange.fetch_ohlcv(item['symbol'], timeframe='1h', limit=80)
-                df_1h = pd.DataFrame(ohlcv_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+                ohlcv_1h = exchange.fetch_ohlcv(item['symbol'], timeframe='1h', limit=100)
+                # --- 關鍵修正：剔除最後一根未收盤的 1H K 棒 ---
+                df_1h = pd.DataFrame(ohlcv_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).iloc[:-1]
+                
+                # 只取 3D K 棒開盤之後的資料
                 df_1h = df_1h[df_1h['ts'] >= item['start_ts']].reset_index(drop=True)
+                
+                # 確保總數是 3 的倍數，捨棄不足 3 根的末尾
+                df_1h = df_1h.iloc[: (len(df_1h) // 3) * 3]
                 
                 entry, sl, target, is_comp = None, None, None, False
                 
-                # 每 3 根 1H K棒作為一組
                 for i in range(0, len(df_1h), 3):
                     chunk = df_1h.iloc[i : i+3]
-                    if len(chunk) < 3: break # 不足 3 根則跳過
-                    
-                    last_bar = chunk.iloc[-1] # 最後一根 K 棒
+                    last_bar = chunk.iloc[-1] 
                     
                     if entry is None:
-                        # 條件：最後一根 K 棒收盤大於壓力位
+                        # 最後一根收盤 > 壓力位
                         if last_bar['close'] > item['p_price']:
                             entry = last_bar['close']
-                            # 止損點：最後 2 根 K 棒的最低價 (i+1 和 i+2 索引處)
+                            # 止損點：該組最後兩根(第2、3根)的最低價
                             sl = chunk.iloc[1:3]['low'].min()
                             risk = entry - sl
                             target = entry + (risk * 15) if risk > 0 else entry * 50
                     else:
-                        # 監控後續所有 1H K棒 (為了靈敏度，這裡逐根監控)
+                        # 監控後續 K 棒是否達標或止損
                         for _, bar in chunk.iterrows():
                             if bar['high'] >= target: is_comp = True; break
                             if bar['low'] <= sl: entry = None; break
@@ -94,9 +99,14 @@ def check_bitget_signals():
                 
                 if entry and not is_comp:
                     display_name = item['symbol'].split(':')[0]
-                    current_data[display_name] = f"•{display_name}\n壓力: `{item['p_price']}` (`{item['p_date']}`)\n進場: `{entry:.4f}` / 止損: `{sl:.4f}`"
+                    current_data[display_name] = (
+                        f"•{display_name}\n"
+                        f"壓力: `{item['p_price']}` (`{item['p_date']}`)\n"
+                        f"進場: `{entry:.4f}` / 止損: `{sl:.4f}`"
+                    )
             except: continue
 
+        # --- 三頁面比對與發送 (同前) ---
         current_symbols = set(current_data.keys())
         new_s = current_symbols - last_symbols
         hold_s = current_symbols & last_symbols
