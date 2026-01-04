@@ -28,9 +28,7 @@ def save_current_symbols(symbols):
         for s in symbols: f.write(f"{s}\n")
 
 def check_bitget_signals():
-    start_run = time.time()
-    send_telegram_msg(f"📅 *1/4 換軌掃描開始...*")
-    
+    send_telegram_msg(f"📅 *TV 日曆對齊掃描開始* (1/4 新週期)")
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
     last_symbols = load_last_symbols()
 
@@ -41,32 +39,34 @@ def check_bitget_signals():
         pre_selected = []
         for symbol in symbols:
             try:
-                ohlcv_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=40)
+                ohlcv_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=60)
                 if not ohlcv_1d: continue
                 df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-                
-                # 以 1/1 為基準進行 3 天分組 (台灣時間)
                 df_1d['dt'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
-                # 計算與 2026-01-01 的天數差距，每 3 天一組
-                base_date = pd.Timestamp('2026-01-01').tz_localize('Asia/Taipei')
-                df_1d['group_id'] = (df_1d['dt'] - base_date).dt.days // 3
                 
-                df_3d = df_1d.groupby('group_id').agg({
+                # --- 關鍵修正：模擬 TV 的 3D 分組 (每月/每年重置) ---
+                # 邏輯：每個月的 1-3, 4-6... 28-30, 31 是一組
+                df_1d['year'] = df_1d['dt'].dt.year
+                df_1d['month'] = df_1d['dt'].dt.month
+                df_1d['group_in_month'] = (df_1d['dt'].dt.day - 1) // 3
+                
+                df_3d = df_1d.groupby(['year', 'month', 'group_in_month']).agg({
                     'dt':'first', 'open':'first', 'high':'max', 'low':'min', 'close':'last', 'ts':'first'
                 }).sort_values('dt').reset_index(drop=True)
 
-                if len(df_3d) < 9: continue
+                if len(df_3d) < 10: continue
                 
-                # 換軌：今天 (1/4) 屬於最新一根
+                # latest_3d 就是 1/4 開始的這一組
                 latest_3d = df_3d.iloc[-1]
-                lookback_3d = df_3d.iloc[-9:-1] # 包含 1/1-1/3 那一根
+                # lookback_3d 就是包含 TV 上 12/30-31、1/1-1/3 這些特定分組的前 8 根
+                lookback_3d = df_3d.iloc[-9:-1]
                 
                 # 計算壓力位 (次低點)
                 sorted_3d = lookback_3d.sort_values(by='low').reset_index(drop=True)
                 p_price = sorted_3d.loc[1, 'low']
                 p_date = sorted_3d.loc[1, 'dt'].strftime('%m/%d')
 
-                # 只要目前這組 3D 有摸到壓力位就進入 1H 檢查
+                # 判定
                 if latest_3d['high'] >= p_price:
                     pre_selected.append({'symbol': symbol, 'p_price': p_price, 'p_date': p_date, 'start_ts': latest_3d['ts']})
             except: continue
@@ -77,17 +77,17 @@ def check_bitget_signals():
                 ohlcv_1h = exchange.fetch_ohlcv(item['symbol'], timeframe='1h', limit=100)
                 df_1h = pd.DataFrame(ohlcv_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).iloc[:-1]
                 
-                # 僅看 1/4 08:00 之後
+                # 僅看當前 3D 週期起點（1/4 08:00）之後
                 df_1h = df_1h[df_1h['ts'] >= item['start_ts']].reset_index(drop=True)
-                if len(df_1h) < 3: continue 
 
+                # 模擬 3H 區間 (08-11, 11-14, 14-17...)
+                # 注意：Bitget 1H K棒的 TS 是開盤時間，所以 08, 09, 10 這三根算一組
                 entry, sl, target, is_comp = None, None, None, False
-                # 快速模擬 3H 固定區間 (不使用 resample)
                 for i in range(0, len(df_1h) - 2, 3):
                     group = df_1h.iloc[i : i+3]
                     if len(group) < 3: break
                     
-                    last_bar = group.iloc[-1]
+                    last_bar = group.iloc[-1] # 第 3 根 1H
                     if entry is None:
                         if last_bar['close'] > item['p_price']:
                             entry = last_bar['close']
@@ -104,6 +104,7 @@ def check_bitget_signals():
                     current_data[display_name] = f"•{display_name}\n壓力: `{item['p_price']}` (`{item['p_date']}`)\n進場: `{entry}` / 止損: `{sl}`"
             except: continue
 
+        # 輸出結果
         current_symbols = set(current_data.keys())
         new_s = current_symbols - last_symbols
         hold_s = current_symbols & last_symbols
@@ -114,8 +115,6 @@ def check_bitget_signals():
         if rem_s: send_telegram_msg("🚫 *【刪除】*\n\n" + "\n".join([f"• `{s}`" for s in rem_s]))
 
         save_current_symbols(current_symbols)
-        # 顯示耗時
-        print(f"掃描完成，耗時: {time.time() - start_run:.2f}s")
     except Exception as e:
         send_telegram_msg(f"❌ 錯誤: {str(e)}")
 
