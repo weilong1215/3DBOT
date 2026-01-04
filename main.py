@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 import time
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- 設定資訊 ---
 TELEGRAM_TOKEN = '8320176690:AAFSLaveCTTRWDygX1FZdkeHLi2UnxPtfO0' 
@@ -30,7 +30,7 @@ def save_current_symbols(symbols):
         for s in symbols: f.write(f"{s}\n")
 
 def check_bitget_signals():
-    send_telegram_msg("🔍 *策略掃描中...* (嚴格收盤 3H 版)")
+    send_telegram_msg("🔍 *策略掃描中...* (止損邏輯修正版)")
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
     last_symbols = load_last_symbols()
 
@@ -43,9 +43,7 @@ def check_bitget_signals():
             try:
                 ohlcv_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=31)
                 if not ohlcv_1d: continue
-                # 1D 也剔除最後一根未收盤的 K 棒
                 df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).iloc[:-1]
-                
                 if df_1d['vol'].iloc[-1] < 5000: continue
                 
                 df_1d['date'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True)
@@ -53,7 +51,8 @@ def check_bitget_signals():
                 df_3d = df_1d.groupby('group').agg({'date':'first','open':'first','high':'max','low':'min','close':'last','ts':'first'}).sort_values('date').reset_index(drop=True)
                 
                 if len(df_3d) < 9: continue
-                latest_3d, lookback_3d = df_3d.iloc[-1], df_3d.iloc[-9:-1]
+                latest_3d = df_3d.iloc[-1]
+                lookback_3d = df_3d.iloc[-9:-1]
                 sorted_3d = lookback_3d.sort_values(by='low').reset_index(drop=True)
                 p_price, p_date = sorted_3d.loc[1, 'low'], sorted_3d.loc[1, 'date'].strftime('%m/%d')
 
@@ -66,33 +65,36 @@ def check_bitget_signals():
         for item in pre_selected:
             try:
                 time.sleep(0.3)
-                ohlcv_1h = exchange.fetch_ohlcv(item['symbol'], timeframe='1h', limit=100)
-                # --- 關鍵修正：剔除最後一根未收盤的 1H K 棒 ---
+                ohlcv_1h = exchange.fetch_ohlcv(item['symbol'], timeframe='1h', limit=150)
                 df_1h = pd.DataFrame(ohlcv_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).iloc[:-1]
                 
-                # 只取 3D K 棒開盤之後的資料
-                df_1h = df_1h[df_1h['ts'] >= item['start_ts']].reset_index(drop=True)
-                
-                # 確保總數是 3 的倍數，捨棄不足 3 根的末尾
-                df_1h = df_1h.iloc[: (len(df_1h) // 3) * 3]
+                df_1h['dt'] = pd.to_datetime(df_1h['ts'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
+                start_dt = pd.to_datetime(item['start_ts'], unit='ms', utc=True).tz_convert('Asia/Taipei')
+                df_1h = df_1h[df_1h['dt'] >= start_dt].reset_index(drop=True)
+
+                df_1h.set_index('dt', inplace=True)
+                # 固定台灣時間 08:00 開始每 3 小時一組
+                resampler = df_1h.resample('3H', origin='start_day', offset='8h')
                 
                 entry, sl, target, is_comp = None, None, None, False
                 
-                for i in range(0, len(df_1h), 3):
-                    chunk = df_1h.iloc[i : i+3]
-                    last_bar = chunk.iloc[-1] 
+                for label, group in resampler:
+                    if len(group) < 3: continue 
+                    
+                    last_bar = group.iloc[-1]
                     
                     if entry is None:
-                        # 最後一根收盤 > 壓力位
+                        # 當 3H 區間結束，第 3 根收盤價站上壓力位
                         if last_bar['close'] > item['p_price']:
                             entry = last_bar['close']
-                            # 止損點：該組最後兩根(第2、3根)的最低價
-                            sl = chunk.iloc[1:3]['low'].min()
+                            # --- 止損修正：取該 3H 區間內（第1, 2, 3根）的最低價 ---
+                            sl = group['low'].min()
                             risk = entry - sl
+                            # 盈虧比 1:15
                             target = entry + (risk * 15) if risk > 0 else entry * 50
                     else:
-                        # 監控後續 K 棒是否達標或止損
-                        for _, bar in chunk.iterrows():
+                        # 監控後續價格
+                        for _, bar in group.iterrows():
                             if bar['high'] >= target: is_comp = True; break
                             if bar['low'] <= sl: entry = None; break
                         if is_comp or entry is None: break
@@ -106,7 +108,6 @@ def check_bitget_signals():
                     )
             except: continue
 
-        # --- 三頁面比對與發送 (同前) ---
         current_symbols = set(current_data.keys())
         new_s = current_symbols - last_symbols
         hold_s = current_symbols & last_symbols
