@@ -3,122 +3,96 @@ import pandas as pd
 import requests
 import time
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 
-# --- 使用您的設定 ---
+# --- 設定資訊 ---
 TELEGRAM_TOKEN = '8320176690:AAFSLaveCTTRWDygX1FZdkeHLi2UnxPtfO0' 
 TELEGRAM_CHAT_ID = '1041632710'
 DB_FILE = os.path.join(os.getcwd(), "last_symbols.txt")
-
-STOCK_SYMBOLS = ['AAPL', 'TSLA', 'NVDA', 'AMZN', 'MSFT', 'GOOGL', 'META', 'NFLX', 'BABA', 'COIN', 'MSTR', 'AMD', 'PYPL', 'DIS', 'NKE', 'INTC', 'V', 'MA', 'UBER', 'LYFT', 'SHOP', 'GME', 'AMC', 'PLTR', 'SNOW']
 
 def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try: requests.post(url, json=payload, timeout=20)
-    except: pass
-
-def load_last_symbols():
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f: return set(line.strip() for line in f.readlines() if line.strip())
-    return set()
-
-def save_current_symbols(symbols):
-    with open(DB_FILE, "w") as f:
-        for s in symbols: f.write(f"{s}\n")
+    except: print(f"TG 發送失敗: {message}")
 
 def check_bitget_signals():
-    send_telegram_msg("🔍 *正在進行 1/4 週期精確掃描...*")
+    start_time = time.time()
+    send_telegram_msg("🚀 *啟動深度掃描...* (請稍候約 2-3 分鐘)")
+    
     exchange = ccxt.bitget({'timeout': 30000, 'enableRateLimit': True})
-    last_symbols = load_last_symbols()
-    debug_msg = ""
-
+    current_data = {}
+    
     try:
         markets = exchange.load_markets()
-        symbols = [s for s, m in markets.items() if m.get('linear') and m.get('type') == 'swap' and m.get('quote') == 'USDT' and s.split('/')[0] not in STOCK_SYMBOLS]
+        # 過濾掉非 USDT 合約與股票代碼
+        symbols = [s for s, m in markets.items() if m.get('linear') and m.get('quote') == 'USDT' and '1000' not in s]
         
-        pre_selected = []
+        count = 0
         for symbol in symbols:
+            count += 1
+            if count % 30 == 0: time.sleep(1.5) # 每 30 個幣休息一下
+            
             try:
+                # 1. 抓取 1D 資料
                 ohlcv_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=60)
-                if not ohlcv_1d: continue
+                if len(ohlcv_1d) < 35: continue
+                
                 df_1d = pd.DataFrame(ohlcv_1d, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
                 df_1d['dt'] = pd.to_datetime(df_1d['ts'], unit='ms', utc=True).dt.tz_convert('Asia/Taipei')
                 
-                # --- TV 日曆對齊邏輯 ---
+                # 2. TV 日曆分組 (每月/每年重置)
                 df_1d['year'] = df_1d['dt'].dt.year
                 df_1d['month'] = df_1d['dt'].dt.month
-                df_1d['group_in_month'] = (df_1d['dt'].dt.day - 1) // 3
+                df_1d['group'] = (df_1d['dt'].dt.day - 1) // 3
                 
-                df_3d = df_1d.groupby(['year', 'month', 'group_in_month']).agg({
-                    'dt':'first', 'open':'first', 'high':'max', 'low':'min', 'close':'last', 'ts':'first'
+                df_3d = df_1d.groupby(['year', 'month', 'group']).agg({
+                    'dt':'first', 'high':'max', 'low':'min', 'ts':'first'
                 }).sort_values('dt').reset_index(drop=True)
-
-                if len(df_3d) < 10: continue
                 
                 latest_3d = df_3d.iloc[-1]
-                lookback_3d = df_3d.iloc[-9:-1] # 前 8 根 3D
+                lookback_3d = df_3d.iloc[-9:-1] # 前 8 根
                 
+                # 計算壓力 (次低點)
                 sorted_3d = lookback_3d.sort_values(by='low').reset_index(drop=True)
                 p_price = sorted_3d.loc[1, 'low']
-                p_date = sorted_3d.loc[1, 'dt'].strftime('%m/%d')
-
-                # 調試資訊：針對 USDS 記錄壓力位
-                if "USDS" in symbol:
-                    debug_msg = f"📊 *USDS 調試資訊*\n新壓力位: `{p_price}`\n壓力日期: `{p_date}`\n今日最高: `{latest_3d['high']}`"
-
+                
+                # 3. 判定 1/4 區間是否有突破潛力
                 if latest_3d['high'] >= p_price:
-                    pre_selected.append({'symbol': symbol, 'p_price': p_price, 'p_date': p_date, 'start_ts': latest_3d['ts']})
-            except: continue
-
-        # 如果有調試資訊就發送
-        if debug_msg: send_telegram_msg(debug_msg)
-
-        current_data = {}
-        for item in pre_selected:
-            try:
-                ohlcv_1h = exchange.fetch_ohlcv(item['symbol'], timeframe='1h', limit=100)
-                df_1h = pd.DataFrame(ohlcv_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).iloc[:-1]
-                # 僅處理 1/4 08:00 以後
-                df_1h = df_1h[df_1h['ts'] >= item['start_ts']].reset_index(drop=True)
-
-                entry, sl, target, is_comp = None, None, None, False
-                for i in range(0, len(df_1h) - 2, 3):
-                    group = df_1h.iloc[i : i+3]
-                    if len(group) < 3: break
-                    last_bar = group.iloc[-1]
-                    if entry is None:
-                        # 核心判定：1H 的收盤價必須大於壓力位
-                        if last_bar['close'] > item['p_price']:
+                    # 抓取 1H 數據進行精確檢查
+                    ohlcv_1h = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+                    df_1h = pd.DataFrame(ohlcv_1h, columns=['ts', 'open', 'high', 'low', 'close', 'vol']).iloc[:-1]
+                    
+                    # 只看這組 3D 區間開始後的 1H
+                    df_1h = df_1h[df_1h['ts'] >= latest_3d['ts']].reset_index(drop=True)
+                    
+                    entry, sl = None, None
+                    # 3H 模擬 (08-11, 11-14...)
+                    for i in range(0, len(df_1h) - 2, 3):
+                        group = df_1h.iloc[i : i+3]
+                        if len(group) < 3: break
+                        last_bar = group.iloc[-1] # 第三根 1H 收盤
+                        
+                        if last_bar['close'] > p_price:
                             entry = last_bar['close']
                             sl = group['low'].min()
-                            target = entry + ((entry - sl) * 15) if entry > sl else entry * 50
-                    else:
-                        for _, bar in group.iterrows():
-                            if bar['high'] >= target: is_comp = True; break
-                            if bar['low'] <= sl: entry = None; break
-                        if is_comp or entry is None: break
-                
-                if entry and not is_comp:
-                    display_name = item['symbol'].split(':')[0]
-                    current_data[display_name] = f"•{display_name}\n壓力: `{item['p_price']}` (`{item['p_date']}`)\n進場: `{entry}` / 止損: `{sl}`"
+                            break # 找到第一個進場點就跳出
+                    
+                    if entry:
+                        display_name = symbol.split(':')[0]
+                        current_data[display_name] = f"•{display_name}\n壓力: `{p_price}`\n進場: `{entry}` / 止損: `{sl}`"
             except: continue
-
-        current_symbols = set(current_data.keys())
-        new_s = current_symbols - last_symbols
-        hold_s = current_symbols & last_symbols
-        rem_s = last_symbols - current_symbols
-
-        if not current_data and not rem_s:
-            send_telegram_msg("✅ *掃描完成*：1/4 目前尚未有符合「3H 收盤突破」的標的。")
+        
+        # --- 最終結算 ---
+        duration = time.time() - start_time
+        if current_data:
+            msg = "🆕 *【符合策略之標的】*\n\n" + "\n\n".join(current_data.values())
+            send_telegram_msg(msg)
         else:
-            if new_s: send_telegram_msg("🆕 *【新增】*\n\n" + "\n\n".join([current_data[s] for s in new_s]))
-            if hold_s: send_telegram_msg("💎 *【持有】*\n\n" + "\n\n".join([current_data[s] for s in hold_s]))
-            if rem_s: send_telegram_msg("🚫 *【刪除】*\n\n" + "\n".join([f"• `{s}`" for s in rem_s]))
-
-        save_current_symbols(current_symbols)
+            send_telegram_msg(f"✅ *掃描完畢*\n耗時: `{duration:.1f}s` \n目前無符合 3H 收盤突破之標的。")
+            
     except Exception as e:
-        send_telegram_msg(f"❌ 錯誤: {str(e)}")
+        send_telegram_msg(f"❌ 系統崩潰: `{str(e)}`")
 
 if __name__ == "__main__":
     check_bitget_signals()
